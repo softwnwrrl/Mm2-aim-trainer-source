@@ -1,0 +1,512 @@
+local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
+
+if not WindUI then
+    game:GetService("StarterGui"):SetCore("SendNotification", {Title = "Error", Text = "WindUI failed to load", Duration = 5})
+    return
+end
+
+local player = game.Players.LocalPlayer
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local Camera = workspace.CurrentCamera
+
+local character = player.Character or player.CharacterAdded:Wait()
+local humanoid = character:WaitForChild("Humanoid")
+local rootPart = character:WaitForChild("HumanoidRootPart")
+
+-- ============ SETTINGS ============
+local espEnabled = true
+local buttonSize = 65
+local shootOffset = 1
+local showButton = true
+local autoFarmEnabled = false
+local currentGun = nil
+
+-- ESP
+local espObjects = {}
+local COLORS = {
+    Bot = Color3.fromRGB(255, 0, 0),
+    Target = Color3.fromRGB(255, 255, 0)
+}
+
+local screenGui = nil
+local shootButton = nil
+local currentTarget = nil
+local farmConnection = nil
+
+-- ============ GET BOTS ============
+local function getBots()
+    local bots = {}
+    local playerChar = character
+    if not playerChar then return bots end
+    
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("Model") and obj ~= playerChar then
+            local hum = obj:FindFirstChildWhichIsA("Humanoid")
+            if hum and hum.Health > 0 then
+                local root = obj:FindFirstChild("HumanoidRootPart") or obj:FindFirstChild("Torso")
+                if root then
+                    table.insert(bots, {
+                        model = obj,
+                        humanoid = hum,
+                        rootPart = root,
+                        head = obj:FindFirstChild("Head"),
+                        originalCF = root.CFrame
+                    })
+                end
+            end
+        end
+    end
+    return bots
+end
+
+-- ============ CORE LOGIC ============
+
+local function detectGun()
+    local equipped = player:FindFirstChild("EquippedGun")
+    if equipped and equipped.Value ~= currentGun then
+        currentGun = equipped.Value
+        WindUI:Notify({Title = "Gun", Content = currentGun, Duration = 2})
+    elseif (not equipped or equipped.Value == nil) and currentGun ~= nil then
+        currentGun = nil
+        WindUI:Notify({Title = "Gun", Content = "No gun", Duration = 2})
+    end
+end
+
+local function getClosestBot()
+    local bots = getBots()
+    if #bots == 0 then return nil end
+    
+    local playerPos = rootPart and rootPart.Position or Vector3.zero
+    local closest = nil
+    local closestDist = math.huge
+    
+    for _, bot in ipairs(bots) do
+        local botPos = bot.rootPart and bot.rootPart.Position
+        if botPos then
+            local dist = (playerPos - botPos).Magnitude
+            if dist < closestDist then
+                closestDist = dist
+                closest = bot.model
+            end
+        end
+    end
+    
+    return closest
+end
+
+local function predictPosition(target)
+    if not target or not target:FindFirstChild("HumanoidRootPart") then
+        return Vector3.zero
+    end
+
+    local hrp = target.HumanoidRootPart
+    local velocity = hrp.AssemblyLinearVelocity
+    local ping = player:GetNetworkPing() or 0
+    local pingAdjust = velocity * math.max(0, ping)
+
+    return hrp.Position + velocity * (shootOffset / 15) + pingAdjust
+end
+
+local function equipGun()
+    if not currentGun then return end
+    local gun = player.Backpack:FindFirstChild(currentGun)
+    if gun then
+        gun.Parent = character
+    end
+end
+
+local function unequipGun()
+    if not currentGun then return end
+    local gun = character:FindFirstChild(currentGun)
+    if gun then
+        gun.Parent = player.Backpack
+    end
+end
+
+local function shoot()
+    if not currentGun then
+        WindUI:Notify({Title = "Error", Content = "No gun", Duration = 2})
+        return
+    end
+
+    local target = getClosestBot()
+    if not target then
+        WindUI:Notify({Title = "Error", Content = "No target", Duration = 1})
+        return
+    end
+
+    if not character or not rootPart then
+        return
+    end
+
+    equipGun()
+    local predicted = predictPosition(target)
+    task.wait(0.05)
+
+    local gun = character:FindFirstChild(currentGun)
+    if gun and gun:FindFirstChild("GunServer") and gun.GunServer:FindFirstChild("ShootStart") then
+        gun.GunServer.ShootStart:FireServer(1, predicted)
+    end
+
+    unequipGun()
+end
+
+local function knifeAimbot()
+    local target = getClosestBot()
+    if not target or not target:FindFirstChild("HumanoidRootPart") then
+        return
+    end
+    
+    local targetPos = target.HumanoidRootPart.Position
+    rootPart.CFrame = CFrame.new(rootPart.Position, Vector3.new(targetPos.X, rootPart.Position.Y, targetPos.Z))
+end
+
+-- ============ KEYBINDS ============
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    
+    if input.KeyCode == Enum.KeyCode.E then
+        shoot()
+    elseif input.KeyCode == Enum.KeyCode.F then
+        autoFarmEnabled = not autoFarmEnabled
+        if autoFarmEnabled then
+            startAutoFarm()
+            WindUI:Notify({Title = "Auto Farm", Content = "ON (press F to OFF)", Duration = 2})
+        else
+            stopAutoFarm()
+            WindUI:Notify({Title = "Auto Farm", Content = "OFF", Duration = 1})
+        end
+    end
+end)
+
+-- ============ ESP ============
+local function updateESP()
+    for _, data in pairs(espObjects) do
+        if data.billboard then data.billboard:Destroy() end
+        if data.highlight then data.highlight:Destroy() end
+    end
+    espObjects = {}
+    
+    if not espEnabled then return end
+    
+    local bots = getBots()
+    for _, bot in ipairs(bots) do
+        local root = bot.rootPart
+        if root and root.Parent then
+            local isTarget = (currentTarget == bot.model)
+            local color = isTarget and COLORS.Target or COLORS.Bot
+            
+            local billboard = Instance.new("BillboardGui")
+            billboard.Size = UDim2.new(0, 100, 0, 30)
+            billboard.StudsOffset = Vector3.new(0, 2, 0)
+            billboard.AlwaysOnTop = true
+            billboard.Parent = root
+            
+            local label = Instance.new("TextLabel")
+            label.Size = UDim2.new(1, 0, 1, 0)
+            label.BackgroundTransparency = 1
+            label.TextColor3 = color
+            label.Text = "BOT"
+            label.TextSize = 14
+            label.Font = Enum.Font.GothamBold
+            label.Parent = billboard
+            
+            local highlight = Instance.new("Highlight")
+            highlight.FillColor = color
+            highlight.FillTransparency = 0.6
+            highlight.OutlineColor = color
+            highlight.Parent = bot.model
+            
+            espObjects[bot.model] = {billboard = billboard, highlight = highlight}
+        end
+    end
+end
+
+local function updateTarget()
+    currentTarget = getClosestBot()
+    updateESP()
+end
+
+-- ============ AUTO FARM ============
+local function teleportBotToFace(bot)
+    if not bot or not bot.rootPart then return false end
+    
+    bot.originalCF = bot.rootPart.CFrame
+    
+    local head = character:FindFirstChild("Head")
+    local facePos = head and head.Position or rootPart.Position
+    local lookVector = head and head.CFrame.LookVector or rootPart.CFrame.LookVector
+    
+    local teleportPos = facePos + lookVector * 2
+    bot.rootPart.CFrame = CFrame.new(teleportPos)
+    
+    return true
+end
+
+local function restoreBotPosition(bot)
+    if bot and bot.rootPart and bot.originalCF then
+        bot.rootPart.CFrame = bot.originalCF
+    end
+end
+
+local function startAutoFarm()
+    if farmConnection then farmConnection:Disconnect() end
+    
+    farmConnection = RunService.RenderStepped:Connect(function()
+        if not autoFarmEnabled then return end
+        if not character or not character.Parent then return end
+        
+        local bots = getBots()
+        if #bots == 0 then return end
+        
+        for _, bot in ipairs(bots) do
+            if bot and bot.rootPart then
+                teleportBotToFace(bot)
+                task.wait(0.1)
+                
+                if currentGun then
+                    equipGun()
+                    local predicted = predictPosition(bot.model)
+                    task.wait(0.05)
+                    local gun = character:FindFirstChild(currentGun)
+                    if gun and gun:FindFirstChild("GunServer") and gun.GunServer:FindFirstChild("ShootStart") then
+                        gun.GunServer.ShootStart:FireServer(1, predicted)
+                    end
+                    unequipGun()
+                else
+                    knifeAimbot()
+                end
+                
+                task.wait(0.1)
+                restoreBotPosition(bot)
+            end
+        end
+    end)
+end
+
+local function stopAutoFarm()
+    if farmConnection then
+        farmConnection:Disconnect()
+        farmConnection = nil
+    end
+end
+
+-- ============ BUTTON (ALWAYS DRAGGABLE) ============
+local function createButton()
+    if screenGui then screenGui:Destroy() end
+    
+    screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "ShootingStuffButton"
+    screenGui.ResetOnSpawn = false
+    screenGui.Parent = player:WaitForChild("PlayerGui")
+    
+    shootButton = Instance.new("TextButton")
+    shootButton.Size = UDim2.new(0, buttonSize, 0, buttonSize)
+    shootButton.Position = UDim2.new(0.85, -buttonSize/2, 0.5, -buttonSize/2)
+    shootButton.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+    shootButton.BackgroundTransparency = 0
+    shootButton.BorderSizePixel = 2
+    shootButton.BorderColor3 = Color3.fromRGB(255, 255, 255)
+    shootButton.Text = "SHOOT"
+    shootButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    shootButton.TextScaled = true
+    shootButton.Font = Enum.Font.GothamBold
+    shootButton.Visible = showButton
+    shootButton.Parent = screenGui
+    
+    local btnCorner = Instance.new("UICorner")
+    btnCorner.CornerRadius = UDim.new(1, 0)
+    btnCorner.Parent = shootButton
+    
+    shootButton.MouseButton1Click:Connect(function()
+        shoot()
+    end)
+    
+    -- DRAG LOGIC
+    local dragging = false
+    local dragStart = nil
+    local startPos = nil
+    
+    shootButton.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            dragStart = input.Position
+            startPos = shootButton.Position
+            shootButton.BackgroundColor3 = Color3.fromRGB(150, 150, 150)
+        end
+    end)
+    
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            local delta = input.Position - dragStart
+            local newX = startPos.X.Offset + delta.X
+            local newY = startPos.Y.Offset + delta.Y
+            local viewport = Camera.ViewportSize
+            newX = math.max(0, math.min(newX, viewport.X - buttonSize))
+            newY = math.max(0, math.min(newY, viewport.Y - buttonSize))
+            shootButton.Position = UDim2.new(0, newX, 0, newY)
+        end
+    end)
+    
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 and dragging then
+            dragging = false
+            shootButton.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+        end
+    end)
+end
+
+-- ============ RESPAWN HANDLER ============
+local function onCharacterAdded(newChar)
+    character = newChar
+    humanoid = newChar:WaitForChild("Humanoid")
+    rootPart = newChar:WaitForChild("HumanoidRootPart")
+    createButton()
+    task.wait(0.5)
+    updateTarget()
+    if autoFarmEnabled then
+        startAutoFarm()
+    end
+end
+
+player.CharacterAdded:Connect(onCharacterAdded)
+
+-- ============ MAIN LOOPS ============
+task.spawn(function()
+    while true do
+        task.wait(0.15)
+        detectGun()
+        if autoFarmEnabled then
+            knifeAimbot()
+        end
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(0.25)
+        if espEnabled then
+            updateTarget()
+        end
+    end
+end)
+
+-- ============ WINDUI MENU ============
+local Window = WindUI:CreateWindow({
+    Title = "source",
+    Author = "DottaWasCorupted",
+    Folder = "shooting_stuff",
+    Size = UDim2.fromOffset(420, 550),
+    Theme = "Dark"
+})
+
+-- ESP TAB
+local ESPTab = Window:Tab({Title = "ESP"})
+
+ESPTab:Toggle({
+    Title = "ESP Enabled",
+    Description = "Show bot ESP (red/yellow)",
+    Default = true,
+    Callback = function(v)
+        espEnabled = v
+        if not v then
+            for _, data in pairs(espObjects) do
+                if data.billboard then data.billboard:Destroy() end
+                if data.highlight then data.highlight:Destroy() end
+            end
+            espObjects = {}
+        else
+            updateTarget()
+        end
+    end
+})
+
+ESPTab:Slider({
+    Title = "Prediction Offset",
+    Description = "0.5-3 (higher = aim ahead)",
+    Value = {Min = 0.5, Max = 3, Default = 1},
+    Step = 0.1,
+    Callback = function(v) shootOffset = v end
+})
+
+-- FARM TAB
+local FarmTab = Window:Tab({Title = "Farm"})
+
+FarmTab:Toggle({
+    Title = "Auto Farm",
+    Description = "Bots teleport to your face (F to toggle)",
+    Default = false,
+    Callback = function(v)
+        autoFarmEnabled = v
+        if v then
+            startAutoFarm()
+            WindUI:Notify({Title = "Auto Farm", Content = "ON", Duration = 2})
+        else
+            stopAutoFarm()
+            WindUI:Notify({Title = "Auto Farm", Content = "OFF", Duration = 1})
+        end
+    end
+})
+
+FarmTab:Paragraph({
+    Title = "Keybinds",
+    Content = "E = Shoot | F = Toggle Auto Farm"
+})
+
+-- BUTTON TAB
+local ButtonTab = Window:Tab({Title = "Button"})
+
+ButtonTab:Toggle({
+    Title = "Show Button",
+    Description = "Show/hide shoot button",
+    Default = true,
+    Callback = function(v)
+        showButton = v
+        if shootButton then shootButton.Visible = v end
+    end
+})
+
+ButtonTab:Slider({
+    Title = "Button Size",
+    Description = "40-120 px",
+    Value = {Min = 40, Max = 120, Default = 65},
+    Step = 5,
+    Callback = function(v)
+        buttonSize = v
+        if shootButton then
+            shootButton.Size = UDim2.new(0, buttonSize, 0, buttonSize)
+        end
+    end
+})
+
+ButtonTab:Button({
+    Title = "Reset Position",
+    Callback = function()
+        if shootButton then
+            shootButton.Position = UDim2.new(0.85, -buttonSize/2, 0.5, -buttonSize/2)
+            WindUI:Notify({Title = "Reset", Content = "Position reset", Duration = 2})
+        end
+    end
+})
+
+-- STATUS TAB
+local StatusTab = Window:Tab({Title = "Status"})
+
+StatusTab:Paragraph({
+    Title = "Current Gun",
+    Content = function() return currentGun or "None (knife mode)" end
+})
+
+StatusTab:Button({
+    Title = "Refresh Gun",
+    Callback = function() detectGun() end
+})
+
+-- ============ INIT ============
+createButton()
+updateESP()
+detectGun()
+
+WindUI:Notify({Title = "SHOOTING STUFF", Content = "E = Shoot | F = Auto Farm", Duration = 3})
+print("SHOOTING STUFF ULTIMATE loaded")
